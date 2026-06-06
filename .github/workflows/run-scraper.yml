@@ -1,4 +1,4 @@
-name: Run Angi Scraper
+name: Run Houzz Scraper
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        city: [columbus, cleveland, cincinnati, toledo, akron, dayton, youngstown]
+        city: [columbus]
 
     runs-on: ubuntu-latest
 
