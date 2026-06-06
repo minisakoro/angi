@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,81 +60,60 @@ def parse_professionals(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     results = []
 
-    # روش ۱ — JSON در صفحه
-    for script in soup.find_all("script", type="application/json"):
-        try:
-            data = json.loads(script.string)
-            pros = _extract_from_json(data)
-            if pros:
-                return pros
-        except Exception:
-            continue
-
-    # روش ۲ — HTML مستقیم
-    cards = soup.select("[class*='hz-pro-search-result']") or \
-            soup.select("[data-component='ProCard']") or \
-            soup.select(".pro-card") or \
-            soup.select("[class*='proCard']")
+    cards = (
+        soup.select("li[class*='hz-pro-search-result']") or
+        soup.select("div[class*='hz-pro-search-result']") or
+        soup.select("[data-component='ProCard']") or
+        soup.select("li.hz-pro-results__item")
+    )
 
     for card in cards:
-        name = card.select_one("[class*='pro-title']") or card.select_one("h2") or card.select_one("h3")
-        reviews = card.select_one("[class*='review']") or card.select_one("[class*='rating']")
-        location = card.select_one("[class*='location']") or card.select_one("[class*='city']")
-        phone = card.select_one("[class*='phone']")
-        link = card.select_one("a[href*='/pro/']") or card.select_one("a[href]")
+        name_el = (
+            card.select_one("h2[class*='hz-pro-title']") or
+            card.select_one("[class*='pro-title']") or
+            card.select_one("h2") or
+            card.select_one("h3")
+        )
+
+        review_el = (
+            card.select_one("[class*='hz-star-rating__label']") or
+            card.select_one("[class*='reviews-count']") or
+            card.select_one("[class*='review-count']")
+        )
+
+        link_el = (
+            card.select_one("a[href*='/pro/']") or
+            card.select_one("a[href*='professionals']") or
+            card.select_one("a[href]")
+        )
 
         review_count = None
-        if reviews:
-            import re
-            nums = re.findall(r'\d+', reviews.get_text())
+        if review_el:
+            nums = re.findall(r'\d+', review_el.get_text())
             review_count = int(nums[0]) if nums else None
 
+        profile_url = None
+        if link_el and link_el.get("href"):
+            href = link_el["href"]
+            profile_url = "https://www.houzz.com" + href if href.startswith("/") else href
+
+        name_text = name_el.get_text(strip=True) if name_el else None
+
+        if not name_text or name_text.replace('.', '').isdigit():
+            continue
+
         results.append({
-            "businessName": name.get_text(strip=True) if name else None,
-            "phoneNumber": phone.get_text(strip=True) if phone else None,
+            "businessName": name_text,
+            "phoneNumber": None,
             "reviewCount": review_count,
-            "location": location.get_text(strip=True) if location else CITY.title() + ", OH",
-            "profileUrl": "https://www.houzz.com" + link["href"] if link and link.get("href", "").startswith("/") else (link["href"] if link else None),
+            "location": CITY.title() + ", OH",
+            "profileUrl": profile_url,
             "source": "houzz",
             "city": CITY.title(),
             "state": "OH",
         })
 
     return results
-
-
-def _extract_from_json(data, depth=0) -> list[dict]:
-    if depth > 8:
-        return []
-    if isinstance(data, list):
-        for item in data:
-            result = _extract_from_json(item, depth + 1)
-            if result:
-                return result
-    if isinstance(data, dict):
-        # دنبال professionals یا pros بگرد
-        for key in ["professionals", "pros", "results", "items", "providers"]:
-            if key in data and isinstance(data[key], list) and len(data[key]) > 0:
-                extracted = []
-                for p in data[key]:
-                    if isinstance(p, dict) and ("name" in p or "businessName" in p or "displayName" in p):
-                        extracted.append({
-                            "businessName": p.get("displayName") or p.get("businessName") or p.get("name"),
-                            "phoneNumber": p.get("phone") or p.get("phoneNumber"),
-                            "reviewCount": p.get("reviewCount") or p.get("totalReviews"),
-                            "location": p.get("city") or CITY.title(),
-                            "profileUrl": p.get("profileUrl") or p.get("url"),
-                            "source": "houzz",
-                            "city": CITY.title(),
-                            "state": "OH",
-                        })
-                if extracted:
-                    return extracted
-        for v in data.values():
-            result = _extract_from_json(v, depth + 1)
-            if result:
-                return result
-    return []
 
 
 def scrape_city() -> list[dict]:
@@ -147,7 +127,7 @@ def scrape_city() -> list[dict]:
         if page == 1:
             url = BASE_URL.format(slug=slug)
         else:
-            url = BASE_URL.format(slug=slug) + f"?fi={((page-1)*15)}"
+            url = BASE_URL.format(slug=slug) + f"?fi={((page - 1) * 15)}"
 
         print(f"Fetching page {page} for {CITY}: {url}")
         html = fetch_page(url)
@@ -184,7 +164,11 @@ def save_and_send(providers: list[dict]) -> None:
         return
 
     csv_b64 = base64.b64encode(df.to_csv(index=False).encode()).decode()
-    payload = {"city": CITY, "data": csv_b64, "run_id": os.environ.get("GITHUB_RUN_ID", "")}
+    payload = {
+        "city": CITY,
+        "data": csv_b64,
+        "run_id": os.environ.get("GITHUB_RUN_ID", "")
+    }
     try:
         resp = httpx.post(webhook_url, json=payload, timeout=30)
         print(f"[DONE] Webhook: {resp.status_code}")
@@ -197,7 +181,7 @@ def main():
     providers = scrape_city()
     if not providers:
         print("[WARN] No data — Houzz may have blocked or changed structure")
-        sys.exit(0)  # exit 0 تا GitHub Actions fail نشه
+        sys.exit(0)
     save_and_send(providers)
 
 
