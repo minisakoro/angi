@@ -1,0 +1,72 @@
+name: Run Angi Scraper
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  scrape-city:
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        city: [columbus, cleveland, cincinnati, toledo, akron, dayton, youngstown]
+
+    runs-on: ubuntu-latest
+
+    env:
+      CITY: ${{ matrix.city }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scraper/requirements.txt
+
+      - name: Run scraper for ${{ matrix.city }}
+        run: |
+          cd scraper
+          python angi_scraper.py
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.city }}
+          path: scraper/results/
+          retention-days: 30
+
+      - name: Post results to webhook
+        if: env.WEBHOOK_URL != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          python -c "
+          import base64, json, os, httpx, sys, pathlib
+
+          city = os.environ.get('CITY')
+          csv_path = pathlib.Path('scraper/results') / f'all_{city}_roofing.csv'
+          if not csv_path.exists():
+              print('No CSV found for ' + city)
+              sys.exit(0)
+
+          csv_b64 = base64.b64encode(csv_path.read_bytes()).decode('utf-8')
+          payload = {
+              'city': city,
+              'data': csv_b64,
+              'run_id': os.environ.get('GITHUB_RUN_ID', '')
+          }
+
+          resp = httpx.post(os.environ['WEBHOOK_URL'], json=payload, timeout=30)
+          print(f'Webhook status: {resp.status_code}')
+          "

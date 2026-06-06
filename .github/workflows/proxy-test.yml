@@ -1,0 +1,77 @@
+name: Proxy Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-ip:
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check IP address
+        run: |
+          echo "=== Job ${{ matrix.job }} ==="
+          curl -s https://api.ipify.org?format=json
+
+      - name: Save IP to file
+        run: |
+          IP=$(curl -s https://api.ipify.org?format=json)
+          mkdir -p ip-results
+          echo "$IP" > ip-results/job_${{ matrix.job }}.txt
+
+      - name: Upload individual IP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ip-job-${{ matrix.job }}
+          path: ip-results/job_${{ matrix.job }}.txt
+          retention-days: 7
+
+  aggregate-ips:
+    needs: check-ip
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all IP artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-ips
+
+      - name: Aggregate and verify IPs
+        run: |
+          echo "=== Aggregated IP Results ==="
+          mkdir -p ip-results
+          find all-ips -name '*.txt' -exec sh -c 'echo "$(basename {}): $(cat {})"' \; | sort
+          echo ""
+
+          COMBINED=""
+          find all-ips -name '*.txt' | sort | while read f; do
+            IP=$(cat "$f")
+            COMBINED="${COMBINED}${IP}\n"
+          done
+
+          UNIQUE_COUNT=$(echo -e "$COMBINED" | sort | uniq | wc -l | tr -d ' ')
+          TOTAL_COUNT=$(echo -e "$COMBINED" | grep -c '.' || echo 0)
+
+          echo "Total IPs collected: $TOTAL_COUNT"
+          echo "Unique IPs: $UNIQUE_COUNT"
+
+          if [ "$UNIQUE_COUNT" -ne "$TOTAL_COUNT" ]; then
+            echo "::warning::Duplicate IPs detected! Expected $TOTAL_COUNT unique IPs, got $UNIQUE_COUNT"
+          else
+            echo "::notice::All $UNIQUE_COUNT IPs are unique across matrix jobs"
+          fi
+
+          echo -e "$COMBINED" > ip-results/ips.txt
+
+      - name: Upload combined IPs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ips-combined
+          path: ip-results/ips.txt
+          retention-days: 7
