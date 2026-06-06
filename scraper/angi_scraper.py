@@ -52,14 +52,17 @@ def parse_professionals(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     results = []
 
-    links = soup.find_all("a", href=re.compile(r"/professionals/roofing-and-gutters/"))
+    # لینک‌ها داخل li هستن با href به /professionals/roofing-and-gutters/ (با s)
+    links = soup.find_all("a", href=re.compile(r"/professionals/roofing-and-gutters/[^/]+-pf~\d+"))
 
     seen_urls = set()
     for a in links:
         href = a.get("href", "")
-        if href in seen_urls:
+        # normalize: هر دو فرمت hznb و مستقیم
+        clean_href = href.replace("/hznb/", "/")
+        if clean_href in seen_urls:
             continue
-        seen_urls.add(href)
+        seen_urls.add(clean_href)
 
         full_text = a.get_text("\n", strip=True)
         lines = [l.strip() for l in full_text.split("\n") if l.strip()]
@@ -68,22 +71,24 @@ def parse_professionals(html: str) -> list[dict]:
             continue
 
         name = lines[0]
-        if len(name) < 3 or name.lower() in ["next page", "prev", "previous"]:
+        if len(name) < 3:
             continue
 
+        # review count
         review_count = None
-        review_text = " ".join(lines)
-        m = re.search(r'(\d+)\s+Review', review_text, re.IGNORECASE)
+        joined = " ".join(lines)
+        m = re.search(r'(\d+)\s+Review', joined, re.IGNORECASE)
         if m:
             review_count = int(m.group(1))
 
+        # آدرس — خط آخری که OH داره
         address = None
         for line in reversed(lines):
             if ", OH" in line or "Ohio" in line:
                 address = line
                 break
 
-        profile_url = "https://www.houzz.com" + href if href.startswith("/") else href
+        profile_url = "https://www.houzz.com" + clean_href if clean_href.startswith("/") else clean_href
 
         results.append({
             "businessName": name,
@@ -97,6 +102,7 @@ def parse_professionals(html: str) -> list[dict]:
             "state": "OH",
         })
 
+    print(f"  → parsed {len(results)} profiles from page")
     return results
 
 
@@ -151,14 +157,13 @@ def save_and_send(providers: list[dict]) -> None:
 
     total = len(df)
     new_count = int(df["is_new_roofer"].sum())
-    print(f"[DONE] Total: {total} | New roofers: {new_count}")
+    print(f"[DONE] Total: {total} | New roofers (<=10 reviews): {new_count}")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     if not webhook_url:
         print("[INFO] No WEBHOOK_URL, skipping")
         return
 
-    # JSON مستقیم — بدون base64 و CSV parsing
     records = df.where(pd.notnull(df), None).to_dict(orient="records")
     payload = {
         "city": CITY,
