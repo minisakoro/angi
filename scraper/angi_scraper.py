@@ -1,4 +1,4 @@
-import base64
+import json
 import os
 import random
 import re
@@ -52,8 +52,6 @@ def parse_professionals(html: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     results = []
 
-    # داده توی ul > li > a هست
-    # هر آیتم یه <a> با href به /professionals/roofing-and-gutters/...
     links = soup.find_all("a", href=re.compile(r"/professionals/roofing-and-gutters/"))
 
     seen_urls = set()
@@ -69,21 +67,16 @@ def parse_professionals(html: str) -> list[dict]:
         if not lines:
             continue
 
-        # اولین خط = اسم بیزینس
         name = lines[0]
-
-        # رد کردن لینک‌های غیر-بیزینس (ناوبری، pagination)
         if len(name) < 3 or name.lower() in ["next page", "prev", "previous"]:
             continue
 
-        # ریویو count
         review_count = None
         review_text = " ".join(lines)
         m = re.search(r'(\d+)\s+Review', review_text, re.IGNORECASE)
         if m:
             review_count = int(m.group(1))
 
-        # آدرس — معمولاً آخرین خط که شامل OH هست
         address = None
         for line in reversed(lines):
             if ", OH" in line or "Ohio" in line:
@@ -129,12 +122,11 @@ def scrape_city() -> list[dict]:
             print(f"[INFO] No results on page {page}, stopping")
             break
 
-        # deduplicate در همین مرحله
         existing_urls = {p["profileUrl"] for p in all_pros}
         new_pros = [p for p in pros if p["profileUrl"] not in existing_urls]
 
         if not new_pros:
-            print(f"[INFO] All duplicate on page {page}, stopping")
+            print(f"[INFO] All duplicates on page {page}, stopping")
             break
 
         all_pros.extend(new_pros)
@@ -147,31 +139,35 @@ def scrape_city() -> list[dict]:
 def save_and_send(providers: list[dict]) -> None:
     df = pd.DataFrame(providers)
     df["is_new_roofer"] = df["reviewCount"].apply(
-        lambda x: True if (x is None or (isinstance(x, (int, float)) and x <= 10)) else False
+        lambda x: True if (
+            x is None or x == "" or
+            (str(x).replace(".", "").isdigit() and float(x) <= 10)
+        ) else False
     )
 
-    all_path = RESULTS_DIR / f"all_{CITY}_roofing.csv"
-    new_path = RESULTS_DIR / f"new_roofers_{CITY}.csv"
-    df.to_csv(all_path, index=False)
-    df[df["is_new_roofer"]].to_csv(new_path, index=False)
+    RESULTS_DIR.mkdir(exist_ok=True)
+    df.to_csv(RESULTS_DIR / f"all_{CITY}_roofing.csv", index=False)
+    df[df["is_new_roofer"]].to_csv(RESULTS_DIR / f"new_roofers_{CITY}.csv", index=False)
 
     total = len(df)
     new_count = int(df["is_new_roofer"].sum())
-    print(f"[DONE] Total: {total} | New roofers (<=10 reviews): {new_count}")
+    print(f"[DONE] Total: {total} | New roofers: {new_count}")
 
     webhook_url = os.environ.get("WEBHOOK_URL")
     if not webhook_url:
-        print("[INFO] No WEBHOOK_URL, skipping webhook")
+        print("[INFO] No WEBHOOK_URL, skipping")
         return
 
-    csv_b64 = base64.b64encode(df.to_csv(index=False).encode()).decode()
+    # JSON مستقیم — بدون base64 و CSV parsing
+    records = df.where(pd.notnull(df), None).to_dict(orient="records")
     payload = {
         "city": CITY,
-        "data": csv_b64,
         "run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "total": total,
+        "records": records,
     }
     try:
-        resp = httpx.post(webhook_url, json=payload, timeout=30)
+        resp = httpx.post(webhook_url, json=payload, timeout=60)
         print(f"[DONE] Webhook: {resp.status_code}")
     except Exception as e:
         print(f"[ERROR] Webhook failed: {e}")
